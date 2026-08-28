@@ -179,9 +179,10 @@ const make = Effect.fn("desktop.environment.make")(function* (
     t3Home: config.t3Home,
   });
   // The custom Windows identity is intentionally separate, while the Electron
-  // profile stays shared with official T3 Code. This keeps auth, client config,
-  // remote environments, and local reading positions identical, and the
-  // shared single-instance lock prevents both builds from owning ~/.t3 at once.
+  // profile stays shared with official T3 Code. The production launcher also
+  // supplies this directory through --user-data-dir: on Windows safeStorage
+  // initializes before this runtime path is applied and needs the official
+  // profile from the initial process command line.
   const userDataDirName = isDevelopment ? "t3code-dev" : "t3code";
   const legacyUserDataDirName = isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)";
   const linuxApplicationsDir = path.join(

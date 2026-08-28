@@ -78,7 +78,8 @@ if ($SkipInstall) {
 }
 
 $runningT3Apps = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
-  $_.Name -eq "T3 Code Scroll.exe" -or $_.Name -like "T3 Code (*).exe"
+  $_.ExecutablePath -like "*\Programs\t3code-scroll\*" -or
+  ($_.Name -like "T3 Code (*).exe" -and $_.ExecutablePath -like "*\Programs\t3code\*")
 }
 if ($runningT3Apps) {
   throw "Close both official T3 Code and T3 Code Scroll, then run this updater again. The installer is ready at $($installer.FullName)."
@@ -90,4 +91,5 @@ if ($installerProcess.ExitCode -ne 0) {
   throw "The installer exited with code $($installerProcess.ExitCode)."
 }
 
+& (Join-Path $PSScriptRoot "Set-T3CodeScrollShortcuts.ps1")
 Write-Host "T3 Code Scroll is up to date and installed. Close official T3 Code before opening it."

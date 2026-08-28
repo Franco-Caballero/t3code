@@ -32,8 +32,11 @@ try {
     throw "T3 Code Scroll installed, but its executable could not be found."
   }
 
-  Write-TransitionLog "Launching $customExecutable."
-  Start-Process -FilePath $customExecutable
+  $shortcutScript = Join-Path $PSScriptRoot "Set-T3CodeScrollShortcuts.ps1"
+  $launchScript = Join-Path $PSScriptRoot "Launch-T3CodeScroll.ps1"
+  & $shortcutScript
+  Write-TransitionLog "Launching through the shared-profile launcher."
+  & $launchScript
   Write-TransitionLog "Transition complete."
 } catch {
   Write-TransitionLog "Transition failed: $($_.Exception.Message)"

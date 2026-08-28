@@ -15,9 +15,13 @@ work-PC thread opened from this Windows client gets its own remembered position.
 currently synchronize to another client device because that would require changing the server data
 contract and migration path.
 
-Use the desktop shortcut **Abrir T3 Code Scroll** to launch the custom app. It never closes official
-T3 Code automatically: when the official app still owns the shared profile, it asks the user to close
-it and try again.
+Use **Abrir T3 Code Scroll** on the desktop or **T3 Code Scroll** in the Windows Start menu. Both
+point to the guarded launcher. Do not launch `t3code-scroll.exe` directly: the launcher supplies the
+official Electron profile on the initial command line so Windows can decrypt the same project
+catalog. It also pins `T3CODE_HOME` to the existing `.t3` directory. No data is copied.
+
+The launcher never closes official T3 Code automatically: when the official app still owns the
+shared profile, it asks the user to close it and try again.
 
 ## Updating
 
@@ -28,7 +32,8 @@ Close T3 Code Scroll, then double-click `Update-T3-Code-Scroll.cmd`. The updater
 3. installs the locked dependencies and runs focused checks;
 4. builds the optimized x64 Windows package, reusing the official Linux `pty.node` for WSL
    compatibility when it is available; and
-5. silently updates only the separately identified T3 Code Scroll installation.
+5. silently updates only the separately identified T3 Code Scroll installation; and
+6. restores the guarded desktop and Start-menu shortcuts after installation.
 
 If an upstream edit conflicts with the small custom patch, the updater stops before building or
 installing and leaves the conflict visible for Codex to resolve.
