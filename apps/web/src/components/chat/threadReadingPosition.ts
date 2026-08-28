@@ -7,6 +7,8 @@ export interface ThreadTextSelection {
   readonly prefix: string;
   readonly suffix: string;
   readonly rowId: string | null;
+  readonly viewportOffset: number | null;
+  readonly windowOffset: number | null;
 }
 
 export interface ThreadViewportAnchor {
@@ -52,6 +54,14 @@ function parseSelection(value: unknown): ThreadTextSelection | null {
     prefix: candidate.prefix.slice(-SELECTION_CONTEXT_LENGTH),
     suffix: candidate.suffix.slice(0, SELECTION_CONTEXT_LENGTH),
     rowId: candidate.rowId,
+    viewportOffset:
+      typeof candidate.viewportOffset === "number" && Number.isFinite(candidate.viewportOffset)
+        ? candidate.viewportOffset
+        : null,
+    windowOffset:
+      typeof candidate.windowOffset === "number" && Number.isFinite(candidate.windowOffset)
+        ? candidate.windowOffset
+        : null,
   };
 }
 
@@ -159,12 +169,15 @@ export function captureThreadSelection(
   const end = textOffset(scope, range.endContainer, range.endOffset);
   if (start === null || end === null) return null;
   const content = scope.textContent ?? "";
+  const selectionBounds = range.getBoundingClientRect();
 
   return {
     exact,
     prefix: content.slice(Math.max(0, start - SELECTION_CONTEXT_LENGTH), start),
     suffix: content.slice(end, end + SELECTION_CONTEXT_LENGTH),
     rowId: scope === root ? null : (scope.dataset.timelineRowId ?? null),
+    viewportOffset: selectionBounds.top - root.getBoundingClientRect().top,
+    windowOffset: selectionBounds.top,
   };
 }
 
@@ -241,4 +254,30 @@ export function restoreThreadSelection(
   selection.removeAllRanges();
   selection.addRange(range);
   return true;
+}
+
+export function restoredSelectionViewportCorrection(
+  root: HTMLElement,
+  selectionQuote: ThreadTextSelection,
+  selection: Selection | null,
+): number | null {
+  if (
+    (selectionQuote.windowOffset === null && selectionQuote.viewportOffset === null) ||
+    !selection ||
+    selection.rangeCount === 0 ||
+    selection.isCollapsed
+  ) {
+    return null;
+  }
+  const range = selection.getRangeAt(0);
+  if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return null;
+  const actualWindowOffset = range.getBoundingClientRect().top;
+  if (selectionQuote.windowOffset !== null) {
+    return actualWindowOffset - selectionQuote.windowOffset;
+  }
+  return (
+    actualWindowOffset -
+    root.getBoundingClientRect().top -
+    (selectionQuote.viewportOffset as number)
+  );
 }

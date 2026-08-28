@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
   readThreadReadingPosition,
+  restoredSelectionViewportCorrection,
   writeThreadReadingPosition,
   type ThreadReadingPosition,
 } from "./threadReadingPosition";
@@ -25,6 +26,8 @@ describe("thread reading-position persistence", () => {
         prefix: "before ",
         suffix: " after",
         rowId: "message:first",
+        viewportOffset: 217.5,
+        windowOffset: 281.5,
       },
       updatedAt: 123,
     };
@@ -67,5 +70,96 @@ describe("thread reading-position persistence", () => {
       selection: null,
       updatedAt: 100,
     });
+  });
+
+  it("keeps legacy selections readable when they have no viewport offset", () => {
+    const storage = memoryStorage();
+    storage.setItem(
+      "t3code:thread-reading-position:v1:home:thread-legacy",
+      JSON.stringify({
+        scrollOffset: 120,
+        anchor: { rowId: "message:legacy", offset: -8 },
+        selection: {
+          exact: "remember this line",
+          prefix: "before ",
+          suffix: " after",
+          rowId: "message:legacy",
+        },
+        updatedAt: 789,
+      }),
+    );
+
+    expect(readThreadReadingPosition(storage, "home:thread-legacy")?.selection).toEqual({
+      exact: "remember this line",
+      prefix: "before ",
+      suffix: " after",
+      rowId: "message:legacy",
+      viewportOffset: null,
+      windowOffset: null,
+    });
+  });
+
+  it("calculates the scroll correction from the selected line instead of the row start", () => {
+    const selectedNode = {} as Node;
+    const root = {
+      contains: (node: Node) => node === selectedNode,
+      getBoundingClientRect: () => ({ top: 100 }),
+    } as HTMLElement;
+    const selection = {
+      rangeCount: 1,
+      isCollapsed: false,
+      getRangeAt: () => ({
+        startContainer: selectedNode,
+        endContainer: selectedNode,
+        getBoundingClientRect: () => ({ top: 360 }),
+      }),
+    } as unknown as Selection;
+
+    expect(
+      restoredSelectionViewportCorrection(
+        root,
+        {
+          exact: "selected line",
+          prefix: "",
+          suffix: "",
+          rowId: "message:first",
+          viewportOffset: 210,
+          windowOffset: null,
+        },
+        selection,
+      ),
+    ).toBe(50);
+  });
+
+  it("prefers the absolute window coordinate when the timeline header moves", () => {
+    const selectedNode = {} as Node;
+    const root = {
+      contains: (node: Node) => node === selectedNode,
+      getBoundingClientRect: () => ({ top: 140 }),
+    } as HTMLElement;
+    const selection = {
+      rangeCount: 1,
+      isCollapsed: false,
+      getRangeAt: () => ({
+        startContainer: selectedNode,
+        endContainer: selectedNode,
+        getBoundingClientRect: () => ({ top: 360 }),
+      }),
+    } as unknown as Selection;
+
+    expect(
+      restoredSelectionViewportCorrection(
+        root,
+        {
+          exact: "selected line",
+          prefix: "",
+          suffix: "",
+          rowId: "message:first",
+          viewportOffset: 210,
+          windowOffset: 300,
+        },
+        selection,
+      ),
+    ).toBe(60);
   });
 });

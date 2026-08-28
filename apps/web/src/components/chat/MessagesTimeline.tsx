@@ -114,6 +114,7 @@ import {
   captureThreadSelection,
   captureViewportAnchor,
   readThreadReadingPosition,
+  restoredSelectionViewportCorrection,
   restoreThreadSelection,
   type ThreadReadingPosition,
   type ThreadTextSelection,
@@ -209,7 +210,7 @@ const TIMELINE_MAINTAIN_SCROLL_AT_END = {
   },
 } as const;
 const READING_POSITION_WRITE_DELAY_MS = 150;
-const READING_POSITION_RESTORE_MAX_FRAMES = 20;
+const READING_POSITION_RESTORE_SETTLE_MS = 1_500;
 
 // ---------------------------------------------------------------------------
 // Props (public API)
@@ -517,13 +518,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     if (
       initialReadingPosition === null ||
       readingPositionRestoredRef.current ||
+      timelineViewportElement === null ||
       rows.length === 0
     ) {
       return;
     }
     let cancelled = false;
-    let frame = 0;
-    let secondFrame = 0;
+    let settleTimer = 0;
+    let stopStabilizing = () => {};
     const restore = async () => {
       onManualNavigation();
       const timeline = listRef.current;
@@ -542,75 +544,110 @@ export const MessagesTimeline = memo(function MessagesTimeline({
         return;
       }
       readingPositionRequestedEarlierAtRowCountRef.current = null;
+      let initialScroll: Promise<void>;
       if (anchorIndex >= 0 && initialReadingPosition.anchor) {
-        await timeline.scrollToIndex({
+        initialScroll = timeline.scrollToIndex({
           index: anchorIndex,
           animated: false,
           viewOffset: initialReadingPosition.anchor.offset,
         });
       } else {
-        await timeline.scrollToOffset({
+        initialScroll = timeline.scrollToOffset({
           offset: initialReadingPosition.scrollOffset,
           animated: false,
         });
       }
       if (cancelled) return;
-      let remainingFrames = READING_POSITION_RESTORE_MAX_FRAMES;
-      const stabilize = () => {
-        frame = window.requestAnimationFrame(() => {
-          secondFrame = window.requestAnimationFrame(() => {
-            if (cancelled) return;
-            const scrollNode = timeline.getScrollableNode() as HTMLElement | null;
-            const anchor = initialReadingPosition.anchor;
-            let anchorReady = anchor === null;
-            if (scrollNode && anchor) {
-              const anchorElement = Array.from(
-                scrollNode.querySelectorAll<HTMLElement>("[data-timeline-row-id]"),
-              ).find((element) => element.dataset.timelineRowId === anchor.rowId);
-              if (anchorElement) {
-                anchorReady = true;
-                const actualOffset =
-                  anchorElement.getBoundingClientRect().top -
-                  scrollNode.getBoundingClientRect().top;
-                const correction = actualOffset - anchor.offset;
-                if (Math.abs(correction) > 1) {
-                  void timeline.scrollToOffset({
-                    offset: Math.max(
-                      0,
-                      (timeline.getState()?.scroll ?? scrollNode.scrollTop) + correction,
-                    ),
-                    animated: false,
-                  });
-                }
-              }
-            }
-            let selectionReady = initialReadingPosition.selection === null;
-            if (scrollNode && initialReadingPosition.selection) {
-              selectionReady = restoreThreadSelection(
-                scrollNode,
-                initialReadingPosition.selection,
-                window.getSelection(),
-              );
-            }
-            remainingFrames -= 2;
-            if ((!anchorReady || !selectionReady) && remainingFrames > 0) {
-              stabilize();
-              return;
-            }
-            readingPositionRestoredRef.current = true;
-            setRestoringReadingPosition(false);
-          });
-        });
+      const correctPosition = () => {
+        if (cancelled) return;
+        const scrollNode = timeline.getScrollableNode() as HTMLElement | null;
+        if (!scrollNode) return;
+        const browserSelection = window.getSelection();
+        const selectionQuote = initialReadingPosition.selection;
+        let correction: number | null = null;
+        if (
+          selectionQuote &&
+          restoreThreadSelection(scrollNode, selectionQuote, browserSelection)
+        ) {
+          correction = restoredSelectionViewportCorrection(
+            scrollNode,
+            selectionQuote,
+            browserSelection,
+          );
+        }
+        const anchor = initialReadingPosition.anchor;
+        if (correction === null && anchor) {
+          const anchorElement = Array.from(
+            scrollNode.querySelectorAll<HTMLElement>("[data-timeline-row-id]"),
+          ).find((element) => element.dataset.timelineRowId === anchor.rowId);
+          if (anchorElement) {
+            const actualOffset =
+              anchorElement.getBoundingClientRect().top - scrollNode.getBoundingClientRect().top;
+            correction = actualOffset - anchor.offset;
+          }
+        }
+        if (correction !== null && Math.abs(correction) > 1) {
+          scrollNode.scrollTop = Math.max(0, scrollNode.scrollTop + correction);
+        }
       };
-      stabilize();
+
+      const scrollNode = timeline.getScrollableNode() as HTMLElement | null;
+      if (!scrollNode) return;
+      const observerRoot = timelineViewportElement ?? scrollNode.parentElement ?? scrollNode;
+      const mutationObserver = new MutationObserver(correctPosition);
+      mutationObserver.observe(observerRoot, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+      const resizeObserver = new ResizeObserver(correctPosition);
+      resizeObserver.observe(observerRoot);
+
+      const handleSelectionDuringRestore = () => {
+        const selectionQuote = initialReadingPosition.selection;
+        if (!selectionQuote || window.getSelection()?.toString() === selectionQuote.exact) return;
+        correctPosition();
+      };
+      const handleUserInteraction = () => stopStabilizing();
+      stopStabilizing = () => {
+        window.clearTimeout(settleTimer);
+        mutationObserver.disconnect();
+        resizeObserver.disconnect();
+        document.removeEventListener("selectionchange", handleSelectionDuringRestore);
+        observerRoot.removeEventListener("wheel", handleUserInteraction);
+        observerRoot.removeEventListener("touchmove", handleUserInteraction);
+        observerRoot.removeEventListener("pointerdown", handleUserInteraction);
+        observerRoot.removeEventListener("keydown", handleUserInteraction);
+      };
+      document.addEventListener("selectionchange", handleSelectionDuringRestore);
+      observerRoot.addEventListener("wheel", handleUserInteraction, { passive: true });
+      observerRoot.addEventListener("touchmove", handleUserInteraction, { passive: true });
+      observerRoot.addEventListener("pointerdown", handleUserInteraction, { passive: true });
+      observerRoot.addEventListener("keydown", handleUserInteraction);
+      settleTimer = window.setTimeout(stopStabilizing, READING_POSITION_RESTORE_SETTLE_MS);
+
+      correctPosition();
+      void initialScroll.then(correctPosition, () => {});
+      if (cancelled) {
+        stopStabilizing();
+        return;
+      }
+      readingPositionRestoredRef.current = true;
+      setRestoringReadingPosition(false);
     };
     void restore();
     return () => {
       cancelled = true;
-      window.cancelAnimationFrame(frame);
-      window.cancelAnimationFrame(secondFrame);
+      stopStabilizing();
     };
-  }, [initialReadingPosition, listRef, loadEarlier, onManualNavigation, rows]);
+  }, [
+    initialReadingPosition,
+    listRef,
+    loadEarlier,
+    onManualNavigation,
+    rows,
+    timelineViewportElement,
+  ]);
 
   useEffect(() => {
     if (!timelineViewportElement) return;
