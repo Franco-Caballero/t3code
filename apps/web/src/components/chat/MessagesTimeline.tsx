@@ -110,6 +110,15 @@ import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
 import { formatChatTimestampTooltip, formatDayAwareTimestamp } from "../../timestampFormat";
+import {
+  captureThreadSelection,
+  captureViewportAnchor,
+  readThreadReadingPosition,
+  restoreThreadSelection,
+  type ThreadReadingPosition,
+  type ThreadTextSelection,
+  writeThreadReadingPosition,
+} from "./threadReadingPosition";
 
 import {
   buildInlineTerminalContextText,
@@ -199,6 +208,7 @@ const TIMELINE_MAINTAIN_SCROLL_AT_END = {
     layout: true,
   },
 } as const;
+const READING_POSITION_WRITE_DELAY_MS = 150;
 
 // ---------------------------------------------------------------------------
 // Props (public API)
@@ -282,6 +292,19 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   topFadeEnabled = false,
   loadEarlier = null,
 }: MessagesTimelineProps) {
+  const [initialReadingPosition] = useState<ThreadReadingPosition | null>(() =>
+    typeof window === "undefined"
+      ? null
+      : readThreadReadingPosition(window.localStorage, routeThreadKey),
+  );
+  const [restoringReadingPosition, setRestoringReadingPosition] = useState(
+    initialReadingPosition !== null,
+  );
+  const readingPositionRestoredRef = useRef(initialReadingPosition === null);
+  const rememberedSelectionRef = useRef<ThreadTextSelection | null>(
+    initialReadingPosition?.selection ?? null,
+  );
+  const readingPositionWriteTimerRef = useRef<number | null>(null);
   const [expandedTurnIds, setExpandedTurnIds] = useState<ReadonlySet<TurnId>>(new Set());
   const [expandedWorkGroupIds, setExpandedWorkGroupIds] = useState<ReadonlySet<string>>(new Set());
   const [disclosureToggleSettling, setDisclosureToggleSettling] = useState(false);
@@ -437,6 +460,138 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   );
   const [minimapHasPersistentGutter, setMinimapHasPersistentGutter] = useState(false);
   const [minimapHitStripWidth, setMinimapHitStripWidth] = useState(0);
+
+  const captureAndPersistReadingPosition = useCallback(() => {
+    if (typeof window === "undefined") return;
+    const timeline = listRef.current;
+    const scrollNode = timeline?.getScrollableNode() as HTMLElement | null | undefined;
+    if (!timeline || !scrollNode) return;
+    const currentSelection = captureThreadSelection(scrollNode, window.getSelection());
+    if (currentSelection !== null) {
+      rememberedSelectionRef.current = currentSelection;
+    }
+    writeThreadReadingPosition(window.localStorage, routeThreadKey, {
+      scrollOffset: Math.max(0, timeline.getState()?.scroll ?? scrollNode.scrollTop ?? 0),
+      anchor: captureViewportAnchor(scrollNode),
+      selection: rememberedSelectionRef.current,
+      updatedAt: Date.now(),
+    });
+  }, [listRef, routeThreadKey]);
+
+  const scheduleReadingPositionWrite = useCallback(() => {
+    if (typeof window === "undefined" || !readingPositionRestoredRef.current) return;
+    if (readingPositionWriteTimerRef.current !== null) {
+      window.clearTimeout(readingPositionWriteTimerRef.current);
+    }
+    readingPositionWriteTimerRef.current = window.setTimeout(() => {
+      readingPositionWriteTimerRef.current = null;
+      captureAndPersistReadingPosition();
+    }, READING_POSITION_WRITE_DELAY_MS);
+  }, [captureAndPersistReadingPosition]);
+
+  useEffect(() => {
+    if (
+      initialReadingPosition === null ||
+      readingPositionRestoredRef.current ||
+      rows.length === 0
+    ) {
+      return;
+    }
+    let cancelled = false;
+    let frame = 0;
+    let secondFrame = 0;
+    const restore = async () => {
+      onManualNavigation();
+      const timeline = listRef.current;
+      if (!timeline) return;
+      const anchorIndex = initialReadingPosition.anchor
+        ? rows.findIndex((row) => row.id === initialReadingPosition.anchor?.rowId)
+        : -1;
+      if (anchorIndex >= 0 && initialReadingPosition.anchor) {
+        await timeline.scrollToIndex({
+          index: anchorIndex,
+          animated: false,
+          viewOffset: initialReadingPosition.anchor.offset,
+        });
+      } else {
+        await timeline.scrollToOffset({
+          offset: initialReadingPosition.scrollOffset,
+          animated: false,
+        });
+      }
+      if (cancelled) return;
+      frame = window.requestAnimationFrame(() => {
+        secondFrame = window.requestAnimationFrame(() => {
+          if (cancelled) return;
+          const scrollNode = timeline.getScrollableNode() as HTMLElement | null;
+          const anchor = initialReadingPosition.anchor;
+          if (scrollNode && anchor) {
+            const anchorElement = Array.from(
+              scrollNode.querySelectorAll<HTMLElement>("[data-timeline-row-id]"),
+            ).find((element) => element.dataset.timelineRowId === anchor.rowId);
+            if (anchorElement) {
+              const actualOffset =
+                anchorElement.getBoundingClientRect().top - scrollNode.getBoundingClientRect().top;
+              const correction = actualOffset - anchor.offset;
+              if (Math.abs(correction) > 1) {
+                void timeline.scrollToOffset({
+                  offset: Math.max(
+                    0,
+                    (timeline.getState()?.scroll ?? scrollNode.scrollTop) + correction,
+                  ),
+                  animated: false,
+                });
+              }
+            }
+          }
+          if (scrollNode && initialReadingPosition.selection) {
+            restoreThreadSelection(
+              scrollNode,
+              initialReadingPosition.selection,
+              window.getSelection(),
+            );
+          }
+          readingPositionRestoredRef.current = true;
+          setRestoringReadingPosition(false);
+        });
+      });
+    };
+    void restore();
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(frame);
+      window.cancelAnimationFrame(secondFrame);
+    };
+  }, [initialReadingPosition, listRef, onManualNavigation, rows]);
+
+  useEffect(() => {
+    if (!timelineViewportElement) return;
+    const handleSelectionChange = () => {
+      const scrollNode = listRef.current?.getScrollableNode() as HTMLElement | null | undefined;
+      if (!scrollNode) return;
+      const selected = captureThreadSelection(scrollNode, window.getSelection());
+      if (selected === null) return;
+      rememberedSelectionRef.current = selected;
+      scheduleReadingPositionWrite();
+    };
+    const handlePageHide = () => captureAndPersistReadingPosition();
+    document.addEventListener("selectionchange", handleSelectionChange);
+    window.addEventListener("pagehide", handlePageHide);
+    return () => {
+      document.removeEventListener("selectionchange", handleSelectionChange);
+      window.removeEventListener("pagehide", handlePageHide);
+      if (readingPositionWriteTimerRef.current !== null) {
+        window.clearTimeout(readingPositionWriteTimerRef.current);
+        readingPositionWriteTimerRef.current = null;
+      }
+      captureAndPersistReadingPosition();
+    };
+  }, [
+    captureAndPersistReadingPosition,
+    listRef,
+    scheduleReadingPositionWrite,
+    timelineViewportElement,
+  ]);
   const handleAnchorReady = useCallback(
     (info: { anchorIndex: number | undefined }) => {
       if (anchorMessageId !== null && info.anchorIndex !== undefined) {
@@ -458,6 +613,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     if (isAtEnd !== undefined) {
       onIsAtEndChange(isAtEnd);
     }
+    scheduleReadingPositionWrite();
     if (!state || minimapItems.length === 0) {
       return;
     }
@@ -480,7 +636,14 @@ export const MessagesTimeline = memo(function MessagesTimeline({
 
       strip.dataset.inView = inView ? "true" : "false";
     }
-  }, [contentInsetEndAdjustment, listRef, minimapItems, minimapStripMap, onIsAtEndChange]);
+  }, [
+    contentInsetEndAdjustment,
+    listRef,
+    minimapItems,
+    minimapStripMap,
+    onIsAtEndChange,
+    scheduleReadingPositionWrite,
+  ]);
 
   useEffect(() => {
     const frame = requestAnimationFrame(handleScroll);
@@ -561,7 +724,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   // from TimelineRowCtx, which propagates through LegendList's memo.
   const renderItem = useCallback(
     ({ item }: { item: MessagesTimelineRow }) => (
-      <div className="mx-auto w-full min-w-0 max-w-3xl overflow-x-clip" data-timeline-root="true">
+      <div
+        className="mx-auto w-full min-w-0 max-w-3xl overflow-x-clip"
+        data-timeline-root="true"
+        data-timeline-row-id={item.id}
+      >
         <TimelineRowContent row={item} />
       </div>
     ),
@@ -590,11 +757,18 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             getItemType={getItemType}
             renderItem={renderItem}
             estimatedItemSize={90}
-            initialScrollAtEnd
+            dataKey={routeThreadKey}
+            initialScrollAtEnd={initialReadingPosition === null}
+            {...(initialReadingPosition !== null
+              ? { initialScrollOffset: initialReadingPosition.scrollOffset }
+              : {})}
             {...(anchoredEndSpace ? { anchoredEndSpace } : {})}
             contentInsetEndAdjustment={contentInsetEndAdjustment}
             maintainScrollAtEnd={
-              anchoredEndSpace || !liveFollowEnabled || disclosureToggleSettling
+              anchoredEndSpace ||
+              !liveFollowEnabled ||
+              disclosureToggleSettling ||
+              restoringReadingPosition
                 ? false
                 : TIMELINE_MAINTAIN_SCROLL_AT_END
             }

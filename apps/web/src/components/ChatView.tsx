@@ -6939,7 +6939,7 @@ function ChatViewContent(props: ChatViewProps) {
               <MessagesTimeline
                 agentPanelModel={agentPanelModel}
                 onOpenAgents={addAgentsSurface}
-                key={activeThread.id}
+                key={routeThreadKey}
                 isWorking={isWorking}
                 workingStepLabel={workingStepLabel}
                 activeTurnStartedAt={activeWorkStartedAt}
